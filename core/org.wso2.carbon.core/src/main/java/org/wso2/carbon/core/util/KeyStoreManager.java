@@ -33,10 +33,16 @@ import org.wso2.carbon.utils.multitenancy.MultitenantConstants;
 import java.io.*;
 import java.security.Key;
 import java.security.KeyStore;
+import java.security.KeyStoreException;
+import java.security.NoSuchAlgorithmException;
 import java.security.PrivateKey;
+import java.security.Provider;
 import java.security.PublicKey;
+import java.security.Security;
+import java.security.cert.CertificateException;
 import java.security.cert.X509Certificate;
 import java.util.Date;
+import java.util.Properties;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
@@ -311,25 +317,29 @@ public class KeyStoreManager {
     public KeyStore getPrimaryKeyStore() throws Exception {
         if (tenantId == MultitenantConstants.SUPER_TENANT_ID) {
             if (primaryKeyStore == null) {
-
-                ServerConfigurationService config = this.getServerConfigService();
-                String file =
-                        new File(config
-                                .getFirstProperty(RegistryResources.SecurityManagement.SERVER_PRIMARY_KEYSTORE_FILE))
-                                .getAbsolutePath();
-                KeyStore store = KeyStore
-                        .getInstance(config
-                                .getFirstProperty(RegistryResources.SecurityManagement.SERVER_PRIMARY_KEYSTORE_TYPE));
-                String password = config
-                        .getFirstProperty(RegistryResources.SecurityManagement.SERVER_PRIMARY_KEYSTORE_PASSWORD);
-                FileInputStream in = null;
-                try {
-                    in = new FileInputStream(file);
-                    store.load(in, password.toCharArray());
-                    primaryKeyStore = store;
-                } finally {
-                    if (in != null) {
-                        in.close();
+                if (isHSMEnabled()) {
+                    log.info("HSM keystore is enabled. Loading HSM keystore via IAIK PKCS#11 provider.");
+                    primaryKeyStore = getHSMKeyStore();
+                } else {
+                    ServerConfigurationService config = this.getServerConfigService();
+                    String file =
+                            new File(config
+                                    .getFirstProperty(RegistryResources.SecurityManagement.SERVER_PRIMARY_KEYSTORE_FILE))
+                                    .getAbsolutePath();
+                    KeyStore store = KeyStore
+                            .getInstance(config
+                                    .getFirstProperty(RegistryResources.SecurityManagement.SERVER_PRIMARY_KEYSTORE_TYPE));
+                    String password = config
+                            .getFirstProperty(RegistryResources.SecurityManagement.SERVER_PRIMARY_KEYSTORE_PASSWORD);
+                    FileInputStream in = null;
+                    try {
+                        in = new FileInputStream(file);
+                        store.load(in, password.toCharArray());
+                        primaryKeyStore = store;
+                    } finally {
+                        if (in != null) {
+                            in.close();
+                        }
                     }
                 }
             }
@@ -426,11 +436,17 @@ public class KeyStoreManager {
     public PrivateKey getDefaultPrivateKey() throws Exception {
         if (tenantId == MultitenantConstants.SUPER_TENANT_ID) {
             ServerConfigurationService config = this.getServerConfigService();
-            String password = config
-                    .getFirstProperty(RegistryResources.SecurityManagement.SERVER_PRIMARY_KEYSTORE_PASSWORD);
-            String alias = config
-                    .getFirstProperty(RegistryResources.SecurityManagement.SERVER_PRIMARY_KEYSTORE_KEY_ALIAS);
-            return (PrivateKey) primaryKeyStore.getKey(alias, password.toCharArray());
+            if (isHSMEnabled()) {
+                String alias = config.getFirstProperty("Security.HSMKeyStore.KeyAlias");
+                String pin = config.getFirstProperty("Security.HSMKeyStore.Password");
+                return (PrivateKey) primaryKeyStore.getKey(alias, pin.toCharArray());
+            } else {
+                String password = config
+                        .getFirstProperty(RegistryResources.SecurityManagement.SERVER_PRIMARY_KEYSTORE_PASSWORD);
+                String alias = config
+                        .getFirstProperty(RegistryResources.SecurityManagement.SERVER_PRIMARY_KEYSTORE_KEY_ALIAS);
+                return (PrivateKey) primaryKeyStore.getKey(alias, password.toCharArray());
+            }
         }
         throw new CarbonException("Permission denied for accessing primary key store. The primary key store is " +
                 "available only for the super tenant.");
@@ -445,8 +461,9 @@ public class KeyStoreManager {
     public PublicKey getDefaultPublicKey() throws Exception {
         if (tenantId == MultitenantConstants.SUPER_TENANT_ID) {
             ServerConfigurationService config = this.getServerConfigService();
-            String alias = config
-                    .getFirstProperty(RegistryResources.SecurityManagement.SERVER_PRIMARY_KEYSTORE_KEY_ALIAS);
+            String alias = isHSMEnabled()
+                    ? config.getFirstProperty("Security.HSMKeyStore.KeyAlias")
+                    : config.getFirstProperty(RegistryResources.SecurityManagement.SERVER_PRIMARY_KEYSTORE_KEY_ALIAS);
             return (PublicKey) primaryKeyStore.getCertificate(alias).getPublicKey();
         }
         throw new CarbonException("Permission denied for accessing primary key store. The primary key store is " +
@@ -478,13 +495,66 @@ public class KeyStoreManager {
     public X509Certificate getDefaultPrimaryCertificate() throws Exception {
         if (tenantId == MultitenantConstants.SUPER_TENANT_ID) {
             ServerConfigurationService config = this.getServerConfigService();
-            String alias = config
-                    .getFirstProperty(RegistryResources.SecurityManagement.SERVER_PRIMARY_KEYSTORE_KEY_ALIAS);
+            String alias = isHSMEnabled()
+                    ? config.getFirstProperty("Security.HSMKeyStore.KeyAlias")
+                    : config.getFirstProperty(RegistryResources.SecurityManagement.SERVER_PRIMARY_KEYSTORE_KEY_ALIAS);
             return (X509Certificate) getPrimaryKeyStore().getCertificate(alias);
         }
         throw new CarbonException("Permission denied for accessing primary key store. The primary key store is " +
                 "available only for the super tenant.");
     }
+
+    /**
+     * Check if HSM keystore is enabled via deployment.toml configuration.
+     *
+     * @return true if Security.HSMKeyStore.Enabled is set to "true"
+     */
+    private boolean isHSMEnabled() {
+        return Boolean.parseBoolean(
+                this.getServerConfigService().getFirstProperty("Security.HSMKeyStore.Enabled"));
+    }
+
+    /**
+     * Load the HSM keystore using the IAIK PKCS#11 provider.
+     * Reads the native PKCS#11 library path directly from deployment.toml
+     * ({@code Security.HSMKeyStore.NativeModule}).
+     *
+     * @return HSM-backed KeyStore
+     * @throws KeyStoreException        if the PKCS11KeyStore type is not available
+     * @throws CertificateException     if any certificate cannot be loaded
+     * @throws IOException              if the keystore cannot be loaded
+     * @throws NoSuchAlgorithmException if the keystore integrity check algorithm is not available
+     * @throws CarbonException          if called from a non-super-tenant context
+     */
+    public KeyStore getHSMKeyStore() throws KeyStoreException, CertificateException,
+            IOException, NoSuchAlgorithmException, CarbonException {
+        if (tenantId == MultitenantConstants.SUPER_TENANT_ID) {
+            log.debug("Loading HSM key store via IAIK PKCS#11 provider.");
+
+            ServerConfigurationService config = this.getServerConfigService();
+            String nativeModule = config.getFirstProperty("Security.HSMKeyStore.NativeModule");
+            if (nativeModule == null || nativeModule.isEmpty()) {
+                throw new CarbonException("Security.HSMKeyStore.NativeModule is not set in deployment.toml");
+            }
+
+            Properties iaikProps = new Properties();
+            iaikProps.put("PKCS11_NATIVE_MODULE", nativeModule);
+
+            Provider iaikProvider = new iaik.pkcs.pkcs11.provider.IAIKPkcs11(iaikProps);
+            Security.insertProviderAt(iaikProvider, 2);
+
+            KeyStore ks = KeyStore.getInstance("PKCS11KeyStore", iaikProvider);
+            char[] pin = config.getFirstProperty("Security.HSMKeyStore.Password").toCharArray();
+            ks.load(null, pin);
+
+            log.info("HSM keystore loaded successfully via IAIK PKCS#11 provider: " + iaikProvider.getName());
+            return ks;
+        } else {
+            throw new CarbonException("Permission denied for accessing HSM key store. " +
+                    "The HSM key store is available only for the super tenant.");
+        }
+    }
+
 
     private boolean isCachedKeyStoreValid(String keyStoreName) {
         String path = RegistryResources.SecurityManagement.KEY_STORES + "/" + keyStoreName;

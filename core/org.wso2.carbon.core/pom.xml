@@ -192,6 +192,12 @@
             <scope>test</scope>
             <optional>true</optional>
         </dependency>
+        <dependency>
+            <groupId>iaik.pkcs.pkcs11</groupId>
+            <artifactId>iaikPkcs11Provider</artifactId>
+            <version>1.10.0</version>
+            <scope>provided</scope>
+        </dependency>
     </dependencies>
 
     <build>

@@ -496,6 +496,19 @@
             <KeyPassword>{{keystore.primary.key_password}}</KeyPassword>
         </KeyStore>
 
+        {% if keystore.hsm is defined %}
+        <!-- KeyStore configurations for HSM (IAIK PKCS#11). -->
+        <HSMKeyStore>
+            <Enabled>{{keystore.hsm.enabled}}</Enabled>
+            <!-- Path to the PKCS#11 native library -->
+            <NativeModule>{{keystore.hsm.native_module}}</NativeModule>
+            <!-- HSM slot password/PIN -->
+            <Password>{{keystore.hsm.password}}</Password>
+            <!-- Private Key alias in HSM -->
+            <KeyAlias>{{keystore.hsm.key_alias}}</KeyAlias>
+        </HSMKeyStore>
+        {% endif %}
+
         <!--
             The KeyStore which is used for encrypting/decrypting internal data.
             This block is read by Carbon Crypto Service.

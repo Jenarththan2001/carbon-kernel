@@ -64,6 +64,12 @@ file_name = "client-truststore.jks"
 type = "JKS"
 password = "wso2carbon"
 
+#[keystore.hsm]
+#enabled = true
+#native_module = "/usr/lib/softhsm/libsofthsm2.so"
+#password = "1234"
+#key_alias = "wso2carbon"
+
 #[keystore.internal]
 #file_name = "wso2carbon.jks"
 #type ="JKS"
