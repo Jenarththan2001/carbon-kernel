@@ -51,7 +51,9 @@ import java.security.KeyStoreException;
 import java.security.NoSuchAlgorithmException;
 import java.security.NoSuchProviderException;
 import java.security.PrivateKey;
+import java.security.Provider;
 import java.security.PublicKey;
+import java.security.Security;
 import java.security.UnrecoverableKeyException;
 import java.security.cert.Certificate;
 import java.security.cert.CertificateException;
@@ -61,6 +63,7 @@ import java.util.Arrays;
 import java.util.Date;
 import java.util.List;
 import java.util.Optional;
+import java.util.Properties;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
@@ -71,6 +74,7 @@ import java.util.concurrent.ConcurrentHashMap;
 public class KeyStoreManager {
 
     private KeyStore primaryKeyStore = null;
+    private KeyStore hsmKeyStore = null;
     private KeyStore registryKeyStore = null;
     private KeyStore internalKeyStore = null;
     private KeyStore trustStore = null;
@@ -545,6 +549,9 @@ public class KeyStoreManager {
             log.debug("Loading primary key store.");
         }
         if (tenantId == MultitenantConstants.SUPER_TENANT_ID) {
+            if (isHSMEnabled()) {
+                return getHSMKeyStore();
+            }
             if (primaryKeyStore == null) {
 
                 ServerConfigurationService config = this.getServerConfigService();
@@ -763,6 +770,19 @@ public class KeyStoreManager {
             log.debug("Loading primary key store private key.");
         }
         if (tenantId == MultitenantConstants.SUPER_TENANT_ID) {
+            if (isHSMEnabled()) {
+                ServerConfiguration serverConfig = ServerConfiguration.getInstance();
+                String hsmAlias = serverConfig.getFirstProperty("Security.HSM.KeyAlias");
+                if (hsmAlias == null || hsmAlias.isEmpty()) {
+                    hsmAlias = "wso2carbon";
+                }
+                String hsmPin = serverConfig.getFirstProperty("Security.HSM.SlotPin");
+                if (hsmPin == null || hsmPin.isEmpty()) {
+                    hsmPin = "1234";
+                }
+                KeyStore hsmKs = getHSMKeyStore();
+                return (PrivateKey) hsmKs.getKey(hsmAlias, hsmPin.toCharArray());
+            }
             ServerConfigurationService config = this.getServerConfigService();
             String password = config
                     .getFirstProperty(RegistryResources.SecurityManagement.SERVER_PRIMARY_KEYSTORE_PASSWORD);
@@ -828,6 +848,15 @@ public class KeyStoreManager {
      */
     public PublicKey getDefaultPublicKey() throws Exception {
         if (tenantId == MultitenantConstants.SUPER_TENANT_ID) {
+            if (isHSMEnabled()) {
+                ServerConfiguration serverConfig = ServerConfiguration.getInstance();
+                String hsmAlias = serverConfig.getFirstProperty("Security.HSM.KeyAlias");
+                if (hsmAlias == null || hsmAlias.isEmpty()) {
+                    hsmAlias = "wso2carbon";
+                }
+                KeyStore hsmKs = getHSMKeyStore();
+                return (PublicKey) hsmKs.getCertificate(hsmAlias).getPublicKey();
+            }
             ServerConfigurationService config = this.getServerConfigService();
             String alias = config
                     .getFirstProperty(RegistryResources.SecurityManagement.SERVER_PRIMARY_KEYSTORE_KEY_ALIAS);
@@ -863,6 +892,15 @@ public class KeyStoreManager {
             log.debug("Loading primary key store public certificate.");
         }
         if (tenantId == MultitenantConstants.SUPER_TENANT_ID) {
+            if (isHSMEnabled()) {
+                ServerConfiguration serverConfig = ServerConfiguration.getInstance();
+                String hsmAlias = serverConfig.getFirstProperty("Security.HSM.KeyAlias");
+                if (hsmAlias == null || hsmAlias.isEmpty()) {
+                    hsmAlias = "wso2carbon";
+                }
+                KeyStore hsmKs = getHSMKeyStore();
+                return (X509Certificate) hsmKs.getCertificate(hsmAlias);
+            }
             ServerConfigurationService config = this.getServerConfigService();
             String alias = config
                     .getFirstProperty(RegistryResources.SecurityManagement.SERVER_PRIMARY_KEYSTORE_KEY_ALIAS);
@@ -1056,4 +1094,60 @@ public class KeyStoreManager {
             throw new SecurityException("Error in getting the domain name for the tenant id: " + tenantId, e);
         }
     }
+
+    // ── HSM / IAIK PKCS#11 helpers ──────────────────────────────────────────────
+
+    /**
+     * Check whether HSM mode is enabled in carbon.xml / deployment.toml.
+     * Reads {@code Security.HSM.Enabled} from ServerConfiguration.
+     */
+    public boolean isHSMEnabled() {
+        String value = ServerConfiguration.getInstance().getFirstProperty("Security.HSM.Enabled");
+        return "true".equalsIgnoreCase(value);
+    }
+
+    /**
+     * Return the PKCS#11 KeyStore backed by the IAIK provider.
+     * The provider is lazily initialised using the native library path
+     * read directly from {@code Security.HSM.NativeModule} in deployment.toml.
+     */
+    public KeyStore getHSMKeyStore() throws Exception {
+        if (hsmKeyStore != null) {
+            return hsmKeyStore;
+        }
+
+        ServerConfiguration serverConfig = ServerConfiguration.getInstance();
+
+        // ── Read native-library path from deployment.toml ──
+        String nativeLib = serverConfig.getFirstProperty("Security.HSM.NativeModule");
+        if (nativeLib == null || nativeLib.isEmpty()) {
+            throw new CarbonException("Security.HSM.NativeModule is not set in deployment.toml");
+        }
+
+        // ── Initialise the IAIK PKCS#11 provider ──
+        Properties iaikProps = new Properties();
+        iaikProps.put("PKCS11_NATIVE_MODULE", nativeLib);
+
+        Provider iaikProvider = new iaik.pkcs.pkcs11.provider.IAIKPkcs11(iaikProps);
+        if (Security.getProvider(iaikProvider.getName()) == null) {
+            Security.insertProviderAt(iaikProvider, 2);
+            log.info("IAIK PKCS#11 provider registered: " + iaikProvider.getName());
+        } else {
+            iaikProvider = Security.getProvider(iaikProvider.getName());
+        }
+
+        // ── Open the PKCS#11 KeyStore ──
+        String slotPin = serverConfig.getFirstProperty("Security.HSM.SlotPin");
+        if (slotPin == null || slotPin.isEmpty()) {
+            slotPin = "1234";
+        }
+
+        KeyStore ks = KeyStore.getInstance("PKCS11KeyStore", iaikProvider.getName());
+        ks.load(null, slotPin.toCharArray());
+        hsmKeyStore = ks;
+
+        log.info("HSM PKCS#11 KeyStore loaded via IAIK provider (" + iaikProvider.getName() + ").");
+        return hsmKeyStore;
+    }
+
 }
