@@ -538,7 +538,13 @@ public class KeyStoreManager {
             }
 
             Properties iaikProps = new Properties();
+            String slotId = config.getFirstProperty("Security.HSMKeyStore.SlotId");
+            if (slotId == null || slotId.isEmpty()) {
+                throw new CarbonException("Security.HSMKeyStore.SlotId is not set in deployment.toml");
+            }
+
             iaikProps.put("PKCS11_NATIVE_MODULE", nativeModule);
+            iaikProps.put("SLOT_ID", slotId);
 
             Provider iaikProvider = new iaik.pkcs.pkcs11.provider.IAIKPkcs11(iaikProps);
             Security.insertProviderAt(iaikProvider, 2);
