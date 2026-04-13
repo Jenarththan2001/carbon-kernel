@@ -51,7 +51,9 @@ import java.security.KeyStoreException;
 import java.security.NoSuchAlgorithmException;
 import java.security.NoSuchProviderException;
 import java.security.PrivateKey;
+import java.security.Provider;
 import java.security.PublicKey;
+import java.security.Security;
 import java.security.UnrecoverableKeyException;
 import java.security.cert.Certificate;
 import java.security.cert.CertificateException;
@@ -71,6 +73,7 @@ import java.util.concurrent.ConcurrentHashMap;
 public class KeyStoreManager {
 
     private KeyStore primaryKeyStore = null;
+    private KeyStore hsmKeyStore = null;
     private KeyStore registryKeyStore = null;
     private KeyStore internalKeyStore = null;
     private KeyStore trustStore = null;
@@ -90,6 +93,9 @@ public class KeyStoreManager {
     private static final String KEY_STORE_NAME_NULL_ERROR = "Key store name is null or empty.";
     private static final String PERMISSION_DENIED_ERROR = "Permission denied for accessing %s. The %s is " +
             "available only for the super tenant.";
+
+    private static final String SUN_PKCS11 = "SunPKCS11";
+    private static final String PKCS11 = "PKCS11";
 
     /**
      * Private Constructor of the KeyStoreManager
@@ -545,6 +551,11 @@ public class KeyStoreManager {
             log.debug("Loading primary key store.");
         }
         if (tenantId == MultitenantConstants.SUPER_TENANT_ID) {
+            if (isHSMEnabled()) {
+                log.info("HSM keystore is enabled. Loading HSM keystore.");
+                primaryKeyStore = getHSMKeyStore();
+                return primaryKeyStore;
+            }
             if (primaryKeyStore == null) {
 
                 ServerConfigurationService config = this.getServerConfigService();
@@ -763,6 +774,14 @@ public class KeyStoreManager {
             log.debug("Loading primary key store private key.");
         }
         if (tenantId == MultitenantConstants.SUPER_TENANT_ID) {
+            if (isHSMEnabled()) {
+                ServerConfigurationService config = this.getServerConfigService();
+                String alias = config
+                        .getFirstProperty(RegistryResources.SecurityManagement.SERVER_HSM_KEYSTORE_KEY_ALIAS);
+                String password = config
+                        .getFirstProperty(RegistryResources.SecurityManagement.SERVER_HSM_KEYSTORE_PASSWORD);
+                return (PrivateKey) getHSMKeyStore().getKey(alias, password.toCharArray());
+            }
             ServerConfigurationService config = this.getServerConfigService();
             String password = config
                     .getFirstProperty(RegistryResources.SecurityManagement.SERVER_PRIMARY_KEYSTORE_PASSWORD);
@@ -1055,5 +1074,80 @@ public class KeyStoreManager {
         } catch (Exception e) {
             throw new SecurityException("Error in getting the domain name for the tenant id: " + tenantId, e);
         }
+    }
+
+    // ── HSM / SunPKCS11 helpers ─────────────────────────────────────────────────
+
+    /**
+     * Check whether HSM mode is enabled in carbon.xml / deployment.toml.
+     * Reads {@code Security.HSMKeyStore.Enabled} from ServerConfiguration.
+     */
+    public boolean isHSMEnabled() {
+
+        String value = ServerConfiguration.getInstance()
+                .getFirstProperty(RegistryResources.SecurityManagement.SERVER_HSM_KEYSTORE_ENABLED);
+        return "true".equalsIgnoreCase(value);
+    }
+
+    /**
+     * Return the PKCS#11 KeyStore backed by the SunPKCS11 provider.
+     * <p>
+     * The provider is lazily configured using the PKCS#11 configuration file
+     * specified in {@code Security.HSMKeyStore.ProviderConfiguration} in deployment.toml.
+     * <p>
+     * <b>Critical:</b> The configured SunPKCS11 provider is registered at
+     * <em>priority&nbsp;1</em> via {@link Security#insertProviderAt} so that
+     * {@code Signature.getInstance("RSASSA-PSS")} (used by Nimbus JOSE+JWT)
+     * resolves to SunPKCS11 rather than SunRsaSign. Without this, SunRsaSign
+     * would reject the PKCS#11 private key with {@code InvalidKeyException:
+     * key must be RSAPrivateKey}.
+     */
+    public KeyStore getHSMKeyStore() throws Exception {
+
+        if (hsmKeyStore != null) {
+            return hsmKeyStore;
+        }
+
+        ServerConfigurationService config = this.getServerConfigService();
+
+        // ── Read SunPKCS11 configuration file path from deployment.toml ──
+        String providerConfigFile = config
+                .getFirstProperty(RegistryResources.SecurityManagement.SERVER_HSM_KEYSTORE_PROVIDER_CONFIG_FILE);
+        if (providerConfigFile == null || providerConfigFile.trim().isEmpty()) {
+            throw new CarbonException(
+                    RegistryResources.SecurityManagement.SERVER_HSM_KEYSTORE_PROVIDER_CONFIG_FILE
+                            + " is not set in deployment.toml");
+        }
+
+        // ── Configure and register SunPKCS11 at highest priority ──
+        Provider basePkcs11 = Security.getProvider(SUN_PKCS11);
+        if (basePkcs11 == null) {
+            throw new CarbonException("SunPKCS11 provider is not available in this JVM.");
+        }
+        Provider configuredProvider = basePkcs11.configure(providerConfigFile.trim());
+
+        if (Security.getProvider(configuredProvider.getName()) == null) {
+            Security.insertProviderAt(configuredProvider, 1);
+            log.info("SunPKCS11 provider registered at priority 1: " + configuredProvider.getName());
+        } else {
+            configuredProvider = Security.getProvider(configuredProvider.getName());
+            log.debug("SunPKCS11 provider already registered: " + configuredProvider.getName());
+        }
+
+        // ── Open the PKCS#11 KeyStore ──
+        String slotPin = config
+                .getFirstProperty(RegistryResources.SecurityManagement.SERVER_HSM_KEYSTORE_PASSWORD);
+        if (slotPin == null || slotPin.trim().isEmpty()) {
+            throw new CarbonException(
+                    RegistryResources.SecurityManagement.SERVER_HSM_KEYSTORE_PASSWORD
+                            + " is not set in deployment.toml");
+        }
+
+        KeyStore ks = KeyStore.getInstance(PKCS11, configuredProvider);
+        ks.load(null, slotPin.toCharArray());
+        hsmKeyStore = ks;
+
+        log.info("HSM PKCS#11 KeyStore loaded via SunPKCS11 (" + configuredProvider.getName() + ").");
+        return hsmKeyStore;
     }
 }
