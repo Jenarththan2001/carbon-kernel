@@ -496,6 +496,19 @@
             <KeyPassword>{{keystore.primary.key_password}}</KeyPassword>
         </KeyStore>
 
+        {% if keystore.hsm is defined %}
+        <!-- HSM KeyStore configuration (SunPKCS11) -->
+        <HSMKeyStore>
+            <Enabled>{{keystore.hsm.enabled}}</Enabled>
+            <!-- Path to the SunPKCS11 provider configuration file -->
+            <ProviderConfiguration>{{keystore.hsm.provider_configuration}}</ProviderConfiguration>
+            <!-- PKCS#11 token PIN -->
+            <Password>{{keystore.hsm.password}}</Password>
+            <!-- Private key alias on the HSM token -->
+            <KeyAlias>{{keystore.hsm.alias}}</KeyAlias>
+        </HSMKeyStore>
+        {% endif %}
+
         <!--
             The KeyStore which is used for encrypting/decrypting internal data.
             This block is read by Carbon Crypto Service.
