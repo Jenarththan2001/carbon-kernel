@@ -577,7 +577,7 @@ public class KeyStoreManager {
      * specified in {@code Security.HSMKeyStore.ProviderConfiguration} in deployment.toml.
      * <p>
      * <b>Critical:</b> The configured SunPKCS11 provider is registered at
-     * <em>priority&nbsp;1</em> via {@link Security#insertProviderAt} so that
+     * <em>priority&nbsp;2</em> via {@link Security#insertProviderAt} so that
      * {@code Signature.getInstance("RSASSA-PSS")} (used by Nimbus JOSE+JWT)
      * resolves to SunPKCS11 rather than SunRsaSign. Without this, SunRsaSign
      * would reject the PKCS#11 private key with {@code InvalidKeyException:
@@ -608,8 +608,8 @@ public class KeyStoreManager {
         Provider configuredProvider = basePkcs11.configure(providerConfigFile.trim());
 
         if (Security.getProvider(configuredProvider.getName()) == null) {
-            Security.insertProviderAt(configuredProvider, 1);
-            log.info("SunPKCS11 provider registered at priority 1: " + configuredProvider.getName());
+            Security.insertProviderAt(configuredProvider, 2);
+            log.info("SunPKCS11 provider registered at priority 2: " + configuredProvider.getName());
         } else {
             configuredProvider = Security.getProvider(configuredProvider.getName());
             log.debug("SunPKCS11 provider already registered: " + configuredProvider.getName());
