@@ -73,7 +73,6 @@ import java.util.concurrent.ConcurrentHashMap;
 public class KeyStoreManager {
 
     private KeyStore primaryKeyStore = null;
-    private KeyStore hsmKeyStore = null;
     private KeyStore registryKeyStore = null;
     private KeyStore internalKeyStore = null;
     private KeyStore trustStore = null;
@@ -551,25 +550,24 @@ public class KeyStoreManager {
             log.debug("Loading primary key store.");
         }
         if (tenantId == MultitenantConstants.SUPER_TENANT_ID) {
-            if (isHSMEnabled()) {
-                log.info("HSM keystore is enabled. Loading HSM keystore.");
-                primaryKeyStore = getHSMKeyStore();
-                return primaryKeyStore;
-            }
             if (primaryKeyStore == null) {
-
-                ServerConfigurationService config = this.getServerConfigService();
-                String file =
-                        new File(config
-                                .getFirstProperty(RegistryResources.SecurityManagement.SERVER_PRIMARY_KEYSTORE_FILE))
-                                .getAbsolutePath();
-                KeyStore store = KeystoreUtils.getKeystoreInstance(config
-                                .getFirstProperty(RegistryResources.SecurityManagement.SERVER_PRIMARY_KEYSTORE_TYPE));
-                String password = config
-                        .getFirstProperty(RegistryResources.SecurityManagement.SERVER_PRIMARY_KEYSTORE_PASSWORD);
-                try (FileInputStream in = new FileInputStream(file)) {
-                    store.load(in, password.toCharArray());
-                    primaryKeyStore = store;
+                if (isHSMEnabled()) {
+                    log.info("HSM keystore is enabled. Loading HSM keystore.");
+                    primaryKeyStore = getHSMKeyStore();
+                } else {
+                    ServerConfigurationService config = this.getServerConfigService();
+                    String file =
+                            new File(config
+                                    .getFirstProperty(RegistryResources.SecurityManagement.SERVER_PRIMARY_KEYSTORE_FILE))
+                                    .getAbsolutePath();
+                    KeyStore store = KeystoreUtils.getKeystoreInstance(config
+                                    .getFirstProperty(RegistryResources.SecurityManagement.SERVER_PRIMARY_KEYSTORE_TYPE));
+                    String password = config
+                            .getFirstProperty(RegistryResources.SecurityManagement.SERVER_PRIMARY_KEYSTORE_PASSWORD);
+                    try (FileInputStream in = new FileInputStream(file)) {
+                        store.load(in, password.toCharArray());
+                        primaryKeyStore = store;
+                    }
                 }
             }
             return primaryKeyStore;
@@ -774,20 +772,20 @@ public class KeyStoreManager {
             log.debug("Loading primary key store private key.");
         }
         if (tenantId == MultitenantConstants.SUPER_TENANT_ID) {
+            ServerConfigurationService config = this.getServerConfigService();
             if (isHSMEnabled()) {
-                ServerConfigurationService config = this.getServerConfigService();
                 String alias = config
                         .getFirstProperty(RegistryResources.SecurityManagement.SERVER_HSM_KEYSTORE_KEY_ALIAS);
                 String password = config
                         .getFirstProperty(RegistryResources.SecurityManagement.SERVER_HSM_KEYSTORE_PASSWORD);
-                return (PrivateKey) getHSMKeyStore().getKey(alias, password.toCharArray());
+                return (PrivateKey) primaryKeyStore.getKey(alias, password.toCharArray());
+            } else {
+                String password = config
+                        .getFirstProperty(RegistryResources.SecurityManagement.SERVER_PRIMARY_KEYSTORE_PASSWORD);
+                String alias = config
+                        .getFirstProperty(RegistryResources.SecurityManagement.SERVER_PRIMARY_KEYSTORE_KEY_ALIAS);
+                return (PrivateKey) primaryKeyStore.getKey(alias, password.toCharArray());
             }
-            ServerConfigurationService config = this.getServerConfigService();
-            String password = config
-                    .getFirstProperty(RegistryResources.SecurityManagement.SERVER_PRIMARY_KEYSTORE_PASSWORD);
-            String alias = config
-                    .getFirstProperty(RegistryResources.SecurityManagement.SERVER_PRIMARY_KEYSTORE_KEY_ALIAS);
-            return (PrivateKey) primaryKeyStore.getKey(alias, password.toCharArray());
         }
         throw new CarbonException(String.format(PERMISSION_DENIED_ERROR, "primary key store", "primary key store"));
     }
@@ -1104,10 +1102,6 @@ public class KeyStoreManager {
      */
     public KeyStore getHSMKeyStore() throws Exception {
 
-        if (hsmKeyStore != null) {
-            return hsmKeyStore;
-        }
-
         ServerConfigurationService config = this.getServerConfigService();
 
         // ── Read SunPKCS11 configuration file path from deployment.toml ──
@@ -1145,9 +1139,8 @@ public class KeyStoreManager {
 
         KeyStore ks = KeyStore.getInstance(PKCS11, configuredProvider);
         ks.load(null, slotPin.toCharArray());
-        hsmKeyStore = ks;
 
         log.info("HSM PKCS#11 KeyStore loaded via SunPKCS11 (" + configuredProvider.getName() + ").");
-        return hsmKeyStore;
+        return ks;
     }
 }
